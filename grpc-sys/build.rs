@@ -182,7 +182,7 @@ fn build_grpc(cc: &mut Build, library: &str) {
         }
     }
 
-    println!("cargo:rustc-link-lib=static={}", zlib);
+    println!("cargo:rustc-link-lib={}", zlib);
     println!("cargo:rustc-link-lib=static=cares");
     println!("cargo:rustc-link-lib=static=gpr");
     println!("cargo:rustc-link-lib=static=address_sorting");
