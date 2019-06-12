@@ -80,6 +80,7 @@ fn build_grpc(cc: &mut Build, library: &str) {
         }
         if env::var("CARGO_CFG_TARGET_ENV").unwrap_or("".to_owned()) == "musl" {
             config.define("CMAKE_CXX_COMPILER", "g++");
+            config.define("build_WITH_MUSL", "true");
         }
 
         // Cross-compile support for iOS
