@@ -20,22 +20,59 @@ use crate::grpc_sys;
 use crate::cq::{CompletionQueue, CompletionQueueHandle, EventType};
 use crate::task::CallTag;
 
+pub use crate::grpc_sys::GrpcEvent as Event;
+use std::sync::{Mutex, Condvar};
+use std::ptr;
+use std::time::Duration;
+
 // event loop
 fn poll_queue(cq: Arc<CompletionQueueHandle>) {
-    let id = thread::current().id();
-    let cq = CompletionQueue::new(cq, id);
+    let oid = thread::current().id();
+    let cq = CompletionQueue::new(cq, oid);
     loop {
-        let e = cq.next();
-        match e.event_type {
-            EventType::QueueShutdown => break,
-            // timeout should not happen in theory.
-            EventType::QueueTimeout => continue,
-            EventType::OpComplete => {}
+        let cq = cq.clone();
+        let pair = Arc::new((Mutex::new(false), Condvar::new()));
+        let pair2 = pair.clone();
+        thread::spawn(move || {
+            let id = thread::current().id();
+            let mut tag: Option<Box<CallTag>> = None;
+            let mut success = false;
+            {
+                let &(ref lock, ref cvar) = &*pair2;
+                let mut started = lock.lock().unwrap();
+                trace!("cq {:?}:{:?} is waiting", oid, id);
+                loop {
+                    let e = cq.next();
+                    match e.event_type {
+                        EventType::QueueShutdown => break,
+                        // timeout should not happen in theory.
+                        EventType::QueueTimeout => {},
+                        EventType::OpComplete => {
+                            tag = Some(unsafe { Box::from_raw(e.tag as _) });
+                            success = e.success != 0;
+                            break},
+                    }
+                }
+                *started = true;
+                cvar.notify_one();
+            }
+
+            if let Some(tag) = tag {
+                trace!("cq {:?}:{:?} is working", oid, id);
+                tag.resolve(&cq, success);
+                trace!("cq {:?}:{:?} quit", oid, id);
+            } else {
+                // XXX should let oid know
+                trace!("cq {:?}:{:?} shutdown", oid, id);
+            }
+        });
+
+        let &(ref lock, ref cvar) = &*pair;
+        let mut started = lock.lock().unwrap();
+        while !*started {
+            started = cvar.wait(started).unwrap();
         }
-
-        let tag: Box<CallTag> = unsafe { Box::from_raw(e.tag as _) };
-
-        tag.resolve(&cq, e.success != 0);
+        //thread::sleep(Duration::from_secs(3));
     }
 }
 
