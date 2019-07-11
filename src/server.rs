@@ -399,7 +399,9 @@ impl RequestCallContext {
     /// TODO: Is there a better way?
     #[inline]
     pub unsafe fn get_handler(&mut self, path: &[u8]) -> Option<&mut BoxHandler> {
+        use std::thread;
         let registry = &mut *self.registry.get();
+        trace!("{:?} Get request path {:?}", thread::current().id(), String::from_utf8_lossy(path));
         registry.get_mut(path)
     }
 }

@@ -56,7 +56,7 @@ fn poll_queue(cq: Arc<CompletionQueueHandle>) {
             }
 
             if let Some(tag) = tag {
-                trace!("cq {:?}:{:?} is working", oid, id);
+                trace!("cq {:?}:{:?} is working on {:?}", oid, id, tag);
                 tag.resolve(&cq, success);
                 trace!("cq {:?}:{:?} quit", oid, id);
             } else {
