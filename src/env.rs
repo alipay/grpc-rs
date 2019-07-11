@@ -22,8 +22,6 @@ use crate::task::CallTag;
 
 pub use crate::grpc_sys::GrpcEvent as Event;
 use std::sync::{Mutex, Condvar};
-use std::ptr;
-use std::time::Duration;
 
 // event loop
 fn poll_queue(cq: Arc<CompletionQueueHandle>) {
