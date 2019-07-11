@@ -72,7 +72,6 @@ fn poll_queue(cq: Arc<CompletionQueueHandle>) {
         while !*started {
             started = cvar.wait(started).unwrap();
         }
-        //thread::sleep(Duration::from_secs(3));
     }
 }
 
