@@ -26,11 +26,11 @@ use std::sync::mpsc;
 // poll_queue will create WAIT_THREAD_COUNT_DEFAULT threads in begin.
 // If wait thread count < WAIT_THREAD_COUNT_MIN, create number to WAIT_THREAD_COUNT_DEFAULT.
 // If wait thread count > WAIT_THREAD_COUNT_MAX, wait thread will quit to WAIT_THREAD_COUNT_DEFAULT.
-const WAIT_THREAD_COUNT_DEFAULT: usize = 30;
-const WAIT_THREAD_COUNT_MIN: usize = 10;
-const WAIT_THREAD_COUNT_MAX: usize = 50;
+const DEFAULT_WAIT_THREAD_COUNT_DEFAULT: usize = 30;
+const DEFAULT_WAIT_THREAD_COUNT_MIN: usize = 10;
+const DEFAULT_WAIT_THREAD_COUNT_MAX: usize = 50;
 
-fn new_thread(oid: ThreadId, cq: CompletionQueue, wtc: Arc<AtomicUsize>, tx: mpsc::Sender<bool>) {
+fn new_thread(oid: ThreadId, cq: CompletionQueue, wtc: Arc<AtomicUsize>, tx: mpsc::Sender<bool>, min: usize, max: usize) {
     thread::spawn(move || {
         let id = thread::current().id();
         loop {
@@ -38,7 +38,7 @@ fn new_thread(oid: ThreadId, cq: CompletionQueue, wtc: Arc<AtomicUsize>, tx: mps
             let mut success = false;
 
             let c = wtc.fetch_add(1, Ordering::SeqCst);
-            if c > WAIT_THREAD_COUNT_MAX {
+            if c > max {
                 debug!("cq {:?}:{:?} quit, wtc is {}", oid, id, c + 1);
                 wtc.fetch_sub(1, Ordering::SeqCst);
                 break;
@@ -61,7 +61,7 @@ fn new_thread(oid: ThreadId, cq: CompletionQueue, wtc: Arc<AtomicUsize>, tx: mps
                 let tag_str = format!("{:?}", tag);
                 let c = wtc.fetch_sub(1, Ordering::SeqCst);
                 trace!("cq {:?}:{:?} is working on {}, wtc is {}", oid, id, tag_str, c);
-                if c < WAIT_THREAD_COUNT_MIN {
+                if c < min {
                     tx.send(false).unwrap();
                 }
                 tag.resolve(&cq, success);
@@ -76,14 +76,14 @@ fn new_thread(oid: ThreadId, cq: CompletionQueue, wtc: Arc<AtomicUsize>, tx: mps
 }
 
 // event loop
-fn poll_queue(cq: Arc<CompletionQueueHandle>) {
+fn poll_queue(cq: Arc<CompletionQueueHandle>, default: usize, min: usize, max: usize) {
     let oid = thread::current().id();
     let cq = CompletionQueue::new(cq, oid);
     let wtc : Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let (tx, rx): (mpsc::Sender<bool>, mpsc::Receiver<bool>) = mpsc::channel();
 
-    for _ in 0..WAIT_THREAD_COUNT_DEFAULT {
-        new_thread(oid, cq.clone(), wtc.clone(), tx.clone());
+    for _ in 0..default {
+        new_thread(oid, cq.clone(), wtc.clone(), tx.clone(), min, max);
     }
 
     loop {
@@ -99,10 +99,10 @@ fn poll_queue(cq: Arc<CompletionQueueHandle>) {
             break;
         }
         let c = wtc.load(Ordering::SeqCst);
-        if c < WAIT_THREAD_COUNT_MIN {
+        if c < min {
             debug!("poll_queue {:?} create thread, wtc is {}", oid, c);
-            for _ in 0..(WAIT_THREAD_COUNT_DEFAULT - c) {
-                new_thread(oid, cq.clone(), wtc.clone(), tx.clone());
+            for _ in 0..(default - c) {
+                new_thread(oid, cq.clone(), wtc.clone(), tx.clone(), min, max);
             }
         }
     }
@@ -112,6 +112,9 @@ fn poll_queue(cq: Arc<CompletionQueueHandle>) {
 pub struct EnvBuilder {
     cq_count: usize,
     name_prefix: Option<String>,
+    wait_thread_count_default: usize,
+    wait_thread_count_min: usize,
+    wait_thread_count_max: usize,
 }
 
 impl EnvBuilder {
@@ -120,6 +123,9 @@ impl EnvBuilder {
         EnvBuilder {
             cq_count: unsafe { grpc_sys::gpr_cpu_num_cores() as usize },
             name_prefix: None,
+            wait_thread_count_default: DEFAULT_WAIT_THREAD_COUNT_DEFAULT,
+            wait_thread_count_min: DEFAULT_WAIT_THREAD_COUNT_MIN,
+            wait_thread_count_max: DEFAULT_WAIT_THREAD_COUNT_MAX,
         }
     }
 
@@ -132,6 +138,24 @@ impl EnvBuilder {
     pub fn cq_count(mut self, count: usize) -> EnvBuilder {
         assert!(count > 0);
         self.cq_count = count;
+        self
+    }
+
+    pub fn wait_thread_count_default(mut self, count: usize) -> EnvBuilder {
+        assert!(count > 0);
+        self.wait_thread_count_default = count;
+        self
+    }
+
+    pub fn wait_thread_count_min(mut self, count: usize) -> EnvBuilder {
+        assert!(count > 0);
+        self.wait_thread_count_min = count;
+        self
+    }
+
+    pub fn wait_thread_count_max(mut self, count: usize) -> EnvBuilder {
+        assert!(count > 0);
+        self.wait_thread_count_max = count;
         self
     }
 
@@ -148,6 +172,9 @@ impl EnvBuilder {
         }
         let mut cqs = Vec::with_capacity(self.cq_count);
         let mut handles = Vec::with_capacity(self.cq_count);
+        let default = self.wait_thread_count_default;
+        let min = self.wait_thread_count_min;
+        let max = self.wait_thread_count_max;
         for i in 0..self.cq_count {
             let cq = Arc::new(CompletionQueueHandle::new());
             let cq_ = cq.clone();
@@ -155,7 +182,7 @@ impl EnvBuilder {
             if let Some(ref prefix) = self.name_prefix {
                 builder = builder.name(format!("{}-{}", prefix, i));
             }
-            let handle = builder.spawn(move || poll_queue(cq_)).unwrap();
+            let handle = builder.spawn(move || poll_queue(cq_, default, min, max)).unwrap();
             cqs.push(CompletionQueue::new(cq, handle.thread().id()));
             handles.push(handle);
         }
