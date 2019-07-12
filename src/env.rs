@@ -13,7 +13,7 @@
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
-use std::thread::{self, Builder as ThreadBuilder, JoinHandle};
+use std::thread::{self, Builder as ThreadBuilder, JoinHandle, ThreadId};
 
 use crate::grpc_sys;
 
@@ -21,54 +21,89 @@ use crate::cq::{CompletionQueue, CompletionQueueHandle, EventType};
 use crate::task::CallTag;
 
 pub use crate::grpc_sys::GrpcEvent as Event;
-use std::sync::{Mutex, Condvar};
+use std::sync::mpsc;
+
+// poll_queue will create WAIT_THREAD_COUNT_DEFAULT threads in begin.
+// If wait thread count < WAIT_THREAD_COUNT_MIN, create number to WAIT_THREAD_COUNT_DEFAULT.
+// If wait thread count > WAIT_THREAD_COUNT_MAX, wait thread will quit to WAIT_THREAD_COUNT_DEFAULT.
+const WAIT_THREAD_COUNT_DEFAULT: usize = 30;
+const WAIT_THREAD_COUNT_MIN: usize = 10;
+const WAIT_THREAD_COUNT_MAX: usize = 50;
+
+fn new_thread(oid: ThreadId, cq: CompletionQueue, wtc: Arc<AtomicUsize>, tx: mpsc::Sender<bool>) {
+    thread::spawn(move || {
+        let id = thread::current().id();
+        loop {
+            let mut tag: Option<Box<CallTag>> = None;
+            let mut success = false;
+
+            let c = wtc.fetch_add(1, Ordering::SeqCst);
+            if c > WAIT_THREAD_COUNT_MAX {
+                debug!("cq {:?}:{:?} quit, wtc is {}", oid, id, c + 1);
+                wtc.fetch_sub(1, Ordering::SeqCst);
+                break;
+            }
+            trace!("cq {:?}:{:?} is waiting, wtc is {}", oid, id, c + 1);
+            loop {
+                let e = cq.next();
+                match e.event_type {
+                    EventType::QueueShutdown => break,
+                    // timeout should not happen in theory.
+                    EventType::QueueTimeout => {},
+                    EventType::OpComplete => {
+                        tag = Some(unsafe { Box::from_raw(e.tag as _) });
+                        success = e.success != 0;
+                        break},
+                }
+            }
+
+            if let Some(tag) = tag {
+                let tag_str = format!("{:?}", tag);
+                let c = wtc.fetch_sub(1, Ordering::SeqCst);
+                trace!("cq {:?}:{:?} is working on {}, wtc is {}", oid, id, tag_str, c);
+                if c < WAIT_THREAD_COUNT_MIN {
+                    tx.send(false).unwrap();
+                }
+                tag.resolve(&cq, success);
+                trace!("cq {:?}:{:?} is done with {:?}", oid, id, tag_str);
+            } else {
+                trace!("cq {:?}:{:?} shutdown", oid, id);
+                tx.send(true).unwrap();
+                break;
+            }
+        }
+    });
+}
 
 // event loop
 fn poll_queue(cq: Arc<CompletionQueueHandle>) {
     let oid = thread::current().id();
     let cq = CompletionQueue::new(cq, oid);
+    let wtc : Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
+    let (tx, rx): (mpsc::Sender<bool>, mpsc::Receiver<bool>) = mpsc::channel();
+
+    for _ in 0..WAIT_THREAD_COUNT_DEFAULT {
+        new_thread(oid, cq.clone(), wtc.clone(), tx.clone());
+    }
+
     loop {
-        let cq = cq.clone();
-        let pair = Arc::new((Mutex::new(false), Condvar::new()));
-        let pair2 = pair.clone();
-        thread::spawn(move || {
-            let id = thread::current().id();
-            let mut tag: Option<Box<CallTag>> = None;
-            let mut success = false;
-            {
-                let &(ref lock, ref cvar) = &*pair2;
-                let mut started = lock.lock().unwrap();
-                trace!("cq {:?}:{:?} is waiting", oid, id);
-                loop {
-                    let e = cq.next();
-                    match e.event_type {
-                        EventType::QueueShutdown => break,
-                        // timeout should not happen in theory.
-                        EventType::QueueTimeout => {},
-                        EventType::OpComplete => {
-                            tag = Some(unsafe { Box::from_raw(e.tag as _) });
-                            success = e.success != 0;
-                            break},
-                    }
-                }
-                *started = true;
-                cvar.notify_one();
+        trace!("poll_queue {:?} is waiting", oid);
+        let mut shutdown = rx.recv().unwrap();
+        for r in rx.try_iter() {
+            if r {
+                shutdown = r;
             }
-
-            if let Some(tag) = tag {
-                trace!("cq {:?}:{:?} is working on {:?}", oid, id, tag);
-                tag.resolve(&cq, success);
-                trace!("cq {:?}:{:?} quit", oid, id);
-            } else {
-                // XXX should let oid know
-                trace!("cq {:?}:{:?} shutdown", oid, id);
+        }
+        if shutdown {
+            trace!("poll_queue {:?} shutdown", oid);
+            break;
+        }
+        let c = wtc.load(Ordering::SeqCst);
+        if c < WAIT_THREAD_COUNT_MIN {
+            debug!("poll_queue {:?} create thread, wtc is {}", oid, c);
+            for _ in 0..(WAIT_THREAD_COUNT_DEFAULT - c) {
+                new_thread(oid, cq.clone(), wtc.clone(), tx.clone());
             }
-        });
-
-        let &(ref lock, ref cvar) = &*pair;
-        let mut started = lock.lock().unwrap();
-        while !*started {
-            started = cvar.wait(started).unwrap();
         }
     }
 }
