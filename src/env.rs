@@ -80,13 +80,22 @@ struct ThreadS<'a> {
     cq: &'a CompletionQueue,
     wtc: &'a Arc<AtomicUsize>,
     tx: &'a mpsc::Sender<bool>,
+    default: usize,
     min: usize,
     max: usize,
 }
 
-fn new_threads(num: usize, ts: &ThreadS) {
+fn create_threads(num: usize, ts: &ThreadS) {
     for _ in 0..num {
         new_thread(ts.oid, ts.cq.clone(), ts.wtc.clone(), ts.tx.clone(), ts.min, ts.max);
+    }
+}
+
+fn check_create_threads(ts: &ThreadS) {
+    let c = ts.wtc.load(Ordering::SeqCst);
+    if c < ts.min {
+        debug!("poll_queue {:?} create thread, wtc is {}", ts.oid, c);
+        create_threads(ts.max - c, &ts);
     }
 }
 
@@ -99,30 +108,32 @@ fn poll_queue(cq: Arc<CompletionQueueHandle>, default: usize, min: usize, max: u
         cq : &CompletionQueue::new(cq, oid),
         wtc : &Arc::new(AtomicUsize::new(0)),
         tx: &tx,
+        default: default,
         min: min,
         max: max,
     };
 
-    new_threads(default, &ts);
+    create_threads(default, &ts);
 
     loop {
-        trace!("poll_queue {:?} is waiting", oid);
+        debug!("poll_queue {:?} is waiting", oid);
         let mut shutdown = rx.recv().unwrap();
+        debug!("poll_queue {:?} is waked up", oid);
+        if shutdown {
+            break;
+        }
+        check_create_threads(&ts);
         for r in rx.try_iter() {
             if r {
                 shutdown = r;
             }
         }
         if shutdown {
-            trace!("poll_queue {:?} shutdown", oid);
             break;
         }
-        let c = ts.wtc.load(Ordering::SeqCst);
-        if c < min {
-            debug!("poll_queue {:?} create thread, wtc is {}", oid, c);
-            new_threads(default - c, &ts);
-        }
+        check_create_threads(&ts);
     }
+    info!("poll_queue {:?} shutdown", oid);
 }
 
 /// [`Environment`] factory in order to configure the properties.
