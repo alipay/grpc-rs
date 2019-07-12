@@ -75,16 +75,35 @@ fn new_thread(oid: ThreadId, cq: CompletionQueue, wtc: Arc<AtomicUsize>, tx: mps
     });
 }
 
+struct ThreadS<'a> {
+    oid : ThreadId,
+    cq: &'a CompletionQueue,
+    wtc: &'a Arc<AtomicUsize>,
+    tx: &'a mpsc::Sender<bool>,
+    min: usize,
+    max: usize,
+}
+
+fn new_threads(num: usize, ts: &ThreadS) {
+    for _ in 0..num {
+        new_thread(ts.oid, ts.cq.clone(), ts.wtc.clone(), ts.tx.clone(), ts.min, ts.max);
+    }
+}
+
 // event loop
 fn poll_queue(cq: Arc<CompletionQueueHandle>, default: usize, min: usize, max: usize) {
     let oid = thread::current().id();
-    let cq = CompletionQueue::new(cq, oid);
-    let wtc : Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
     let (tx, rx): (mpsc::Sender<bool>, mpsc::Receiver<bool>) = mpsc::channel();
+    let ts = ThreadS {
+        oid : thread::current().id(),
+        cq : &CompletionQueue::new(cq, oid),
+        wtc : &Arc::new(AtomicUsize::new(0)),
+        tx: &tx,
+        min: min,
+        max: max,
+    };
 
-    for _ in 0..default {
-        new_thread(oid, cq.clone(), wtc.clone(), tx.clone(), min, max);
-    }
+    new_threads(default, &ts);
 
     loop {
         trace!("poll_queue {:?} is waiting", oid);
@@ -98,12 +117,10 @@ fn poll_queue(cq: Arc<CompletionQueueHandle>, default: usize, min: usize, max: u
             trace!("poll_queue {:?} shutdown", oid);
             break;
         }
-        let c = wtc.load(Ordering::SeqCst);
+        let c = ts.wtc.load(Ordering::SeqCst);
         if c < min {
             debug!("poll_queue {:?} create thread, wtc is {}", oid, c);
-            for _ in 0..(default - c) {
-                new_thread(oid, cq.clone(), wtc.clone(), tx.clone(), min, max);
-            }
+            new_threads(default - c, &ts);
         }
     }
 }
