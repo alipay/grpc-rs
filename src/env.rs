@@ -37,9 +37,9 @@ fn new_thread(oid: ThreadId, cq: CompletionQueue, wtc: Arc<AtomicUsize>, tx: mps
             let mut tag: Option<Box<CallTag>> = None;
             let mut success = false;
 
-            let c = wtc.fetch_add(1, Ordering::SeqCst);
+            let c = wtc.fetch_add(1, Ordering::SeqCst) + 1;
             if c > max {
-                debug!("cq {:?}:{:?} quit, wtc is {}", oid, id, c + 1);
+                debug!("cq {:?}:{:?} quit, wtc is {}", oid, id, c);
                 wtc.fetch_sub(1, Ordering::SeqCst);
                 break;
             }
@@ -59,7 +59,7 @@ fn new_thread(oid: ThreadId, cq: CompletionQueue, wtc: Arc<AtomicUsize>, tx: mps
 
             if let Some(tag) = tag {
                 let tag_str = format!("{:?}", tag);
-                let c = wtc.fetch_sub(1, Ordering::SeqCst);
+                let c = wtc.fetch_sub(1, Ordering::SeqCst) - 1;
                 trace!("cq {:?}:{:?} is working on {}, wtc is {}", oid, id, tag_str, c);
                 if c < min {
                     tx.send(false).unwrap();
