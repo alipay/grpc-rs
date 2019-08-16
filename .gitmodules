@@ -1,4 +1,0 @@
-[submodule "grpc-sys/grpc"]
-	path = grpc-sys/grpc
-	url = git@gitlab.alipay-inc.com:zh203158/grpc.git
-	branch = vsock
