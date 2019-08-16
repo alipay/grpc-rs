@@ -1,0 +1,4 @@
+[submodule "grpc-sys/grpc"]
+	path = grpc-sys/grpc
+	url = git@github.com:alipay/grpc.git
+	branch = vsock
